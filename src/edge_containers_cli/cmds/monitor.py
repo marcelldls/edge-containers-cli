@@ -1,9 +1,8 @@
 """TUI monitor for containerised IOCs."""
 
+import asyncio
 from collections.abc import Callable
 from functools import total_ordering
-from threading import Thread
-from time import sleep
 from typing import Any, cast
 
 import polars
@@ -11,7 +10,6 @@ from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
 
-# from textual import on
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -26,17 +24,17 @@ from textual.widgets.data_table import RowKey
 from edge_containers_cli.cmds.commands import Commands
 
 
-class OptionScreen(ModalScreen[bool], inherit_bindings=False):
+class ConfirmScreen(ModalScreen[bool], inherit_bindings=False):
     BINDINGS = [
         Binding("y,enter", "option_yes", "Yes"),
         Binding("n,c,escape", "option_cancel", "Cancel"),
     ]
 
-    def __init__(self, service_name: str) -> None:
+    def __init__(self, service_name: str, type_action: str) -> None:
         super().__init__()
 
         self.service_name = service_name
-        self.type_action = "stop"
+        self.type_action = type_action
 
     def compose(self) -> ComposeResult:
         yield Grid(
@@ -61,34 +59,6 @@ class OptionScreen(ModalScreen[bool], inherit_bindings=False):
 
     def action_option_cancel(self) -> None:
         self.dismiss(False)
-
-
-class StartScreen(OptionScreen):
-    """Screen with dialog to start service."""
-
-    def __init__(self, service_name: str) -> None:
-        super().__init__(service_name)
-
-        self.type_action = "start"
-
-
-class StopScreen(OptionScreen):
-    """Screen with dialog to stop service."""
-
-    def __init__(self, service_name: str) -> None:
-        super().__init__(service_name)
-
-        self.type_action = "stop"
-
-
-class RestartScreen(OptionScreen):
-    """Screen with dialog to restart service."""
-
-    def __init__(self, service_name: str) -> None:
-        super().__init__(service_name)
-
-        self.type_action = "restart"
-
 
 class LogsScreen(ModalScreen, inherit_bindings=False):
     """Screen to display IOC logs."""
@@ -231,30 +201,25 @@ class IocTable(Widget):
     def __init__(self, commands, running_only: bool) -> None:
         super().__init__()
 
+        self.refresh_rate = 10
         self.commands = commands
         self.running_only = running_only
         self.iocs_df = self.commands._get_services(self.running_only)
 
         self._polling = True
-        self._poll_thread = Thread(target=self._poll_services)
-        self._poll_thread.start()
         self._get_iocs()
+        self._polling_task = asyncio.create_task(self._poll_services())  # https://github.com/Textualize/textual/discussions/1828
 
-    def _poll_services(self):
+    async def _poll_services(self):
         while self._polling:
-            # ioc list data table update loop
-            print()
-            self.iocs_df = self.commands._get_services(self.running_only)
-            sleep(1.0)
+            self.iocs_df = await asyncio.to_thread(self.commands._get_services, self.running_only)
+            await asyncio.sleep(1.0)
 
     def stop(self):
         self._polling = False
-        self._poll_thread.join()
 
     def _get_iocs(self) -> None:
         iocs = self._convert_df_to_list(self.iocs_df)
-        # give up the GIL to other threads
-        sleep(0)
         self.iocs = sorted(iocs, key=lambda d: d["name"])
         exclude = [None]
 
@@ -273,7 +238,7 @@ class IocTable(Widget):
 
     def on_mount(self) -> None:
         """Provides a loop after generating the app for updating the data."""
-        self.set_interval(1.0, self.update_iocs)
+        self.set_interval(1/self.refresh_rate, self.update_iocs)
 
     async def update_iocs(self) -> None:
         """Updates the IOC stats data."""
@@ -446,9 +411,11 @@ class MonitorApp(App):
         def check_start(start: bool | None) -> None:
             """Called when StartScreen is dismissed."""
             if start:
-                self.commands.start(service_name, False)
+                asyncio.create_task(
+                    asyncio.to_thread(self.commands.start, service_name, True)
+                )
 
-        self.push_screen(StartScreen(service_name), check_start)
+        self.push_screen(ConfirmScreen(service_name, "start"), check_start)
 
     def action_stop_ioc(self) -> None:
         """Stop the IOC that is currently highlighted."""
@@ -457,9 +424,11 @@ class MonitorApp(App):
         def check_stop(stop: bool | None) -> None:
             """Called when StopScreen is dismissed."""
             if stop:
-                self.commands.stop(service_name, False)
+                asyncio.create_task(
+                    asyncio.to_thread(self.commands.stop, service_name, True)
+                )
 
-        self.push_screen(StopScreen(service_name), check_stop)
+        self.push_screen(ConfirmScreen(service_name, "stop"), check_stop)
 
     def action_restart_ioc(self) -> None:
         """Restart the IOC that is currently highlighted."""
@@ -468,9 +437,11 @@ class MonitorApp(App):
         def check_restart(restart: bool | None) -> None:
             """Called when RestartScreen is dismissed."""
             if restart:
-                self.commands.restart(service_name)
+                asyncio.create_task(
+                    asyncio.to_thread(self.commands.restart, service_name)
+                )
 
-        self.push_screen(RestartScreen(service_name), check_restart)
+        self.push_screen(ConfirmScreen(service_name, "restart"), check_restart)
 
     def action_ioc_logs(self) -> None:
         """Display the logs of the IOC that is currently highlighted."""
