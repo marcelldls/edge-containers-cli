@@ -10,7 +10,7 @@ from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
 
-from textual import work
+from textual import work, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.color import Color
@@ -48,17 +48,14 @@ class ConfirmScreen(ModalScreen[bool], inherit_bindings=False):
         )
         yield Footer()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "yes":
-            self.action_option_yes()
-        else:
-            self.action_option_cancel()
-
+    @on(Button.Pressed, "#yes")
     def action_option_yes(self) -> None:
         self.dismiss(True)
 
+    @on(Button.Pressed, "#cancel")
     def action_option_cancel(self) -> None:
         self.dismiss(False)
+
 
 class LogsScreen(ModalScreen, inherit_bindings=False):
     """Screen to display IOC logs."""
